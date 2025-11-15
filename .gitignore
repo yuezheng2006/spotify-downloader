@@ -145,3 +145,7 @@ temp/
 # VS Code
 .vscode
 *.txt
+downloads/
+downloads_test/
+*.pyc
+__pycache__/

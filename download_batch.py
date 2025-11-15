@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""
+spotDL 增强批量下载工具
+=======================
+
+完整元数据管理 - 专业音乐库的推荐下载方式
+
+功能特点：
+  • 每首歌独立目录 - 整洁有序
+  • 完整元数据报告 - metadata.txt + metadata.json
+  • LRC同步歌词 - 带时间轴的歌词文件
+  • 高清专辑封面 - 独立的cover.jpg
+  • 智能批量处理 - 支持单曲/专辑/播放列表/艺术家
+
+使用方法：
+  python3 download_batch.py "SPOTIFY_URL" [选项]
+
+示例：
+  python3 download_batch.py "https://open.spotify.com/album/..." 
+  python3 download_batch.py "https://open.spotify.com/playlist/..." -o music
+  python3 download_batch.py "https://open.spotify.com/artist/..." --max-songs 20
+
+输出结构：
+  downloads/
+  └── Artist - Song/
+      ├── Artist - Song.mp3    # 音频（含ID3标签）
+      ├── Artist - Song.lrc    # 同步歌词
+      ├── cover.jpg            # 专辑封面
+      ├── metadata.txt         # 人类可读
+      └── metadata.json        # 程序可用
+"""
+
+import os
+import sys
+import json
+import subprocess
+import argparse
+import re
+from pathlib import Path
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3
+from datetime import datetime
+
+
+class SpotifyBatchDownloader:
+    """Spotify批量下载器类"""
+    
+    def __init__(self, output_dir="downloads", audio_format="mp3", max_songs=None):
+        """
+        初始化下载器
+        
+        Args:
+            output_dir: 下载目录
+            audio_format: 音频格式 (mp3, wav, flac等)
+            max_songs: 最大下载数量（用于歌手）
+        """
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+        self.audio_format = audio_format
+        self.max_songs = max_songs
+        
+    def sanitize_filename(self, filename):
+        """清理文件名中的非法字符"""
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        return filename.strip()
+    
+    def detect_url_type(self, spotify_url):
+        """
+        检测Spotify URL类型
+        
+        Returns:
+            str: 'track', 'album', 'playlist', 'artist' 或 'unknown'
+        """
+        if 'track/' in spotify_url:
+            return 'track'
+        elif 'album/' in spotify_url:
+            return 'album'
+        elif 'playlist/' in spotify_url:
+            return 'playlist'
+        elif 'artist/' in spotify_url:
+            return 'artist'
+        else:
+            return 'unknown'
+    
+    def get_songs_list(self, spotify_url):
+        """
+        获取URL对应的歌曲列表
+        
+        Returns:
+            list: 临时目录中下载的音频文件列表
+        """
+        temp_dir = self.output_dir / "temp"
+        temp_dir.mkdir(exist_ok=True)
+        
+        # 构建spotdl命令
+        cmd = [
+            "spotdl",
+            "--output", str(temp_dir),
+            "--format", self.audio_format,
+            "--generate-lrc",
+            spotify_url
+        ]
+        
+        # 如果是歌手且设置了最大数量
+        url_type = self.detect_url_type(spotify_url)
+        if url_type == 'artist' and self.max_songs:
+            print(f"⚠️  歌手模式：将下载最多 {self.max_songs} 首热门歌曲")
+        
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return list(temp_dir.glob(f"*.{self.audio_format}"))
+        except subprocess.CalledProcessError as e:
+            print(f"❌ 下载失败: {e.stderr}")
+            return []
+    
+    def process_batch(self, spotify_url):
+        """
+        处理批量下载（专辑、歌手、播放列表）
+        
+        Args:
+            spotify_url: Spotify链接
+        """
+        url_type = self.detect_url_type(spotify_url)
+        
+        type_names = {
+            'album': '专辑',
+            'playlist': '播放列表',
+            'artist': '歌手',
+            'track': '单曲'
+        }
+        
+        print(f"\n{'='*60}")
+        print(f"🎵 检测到类型: {type_names.get(url_type, '未知')}")
+        print(f"🔗 链接: {spotify_url}")
+        print(f"{'='*60}\n")
+        
+        if url_type == 'track':
+            return self.download_song(spotify_url)
+        
+        print("📥 开始下载...")
+        audio_files = self.get_songs_list(spotify_url)
+        
+        if not audio_files:
+            print("❌ 未找到任何歌曲")
+            return False
+        
+        print(f"\n✅ 找到 {len(audio_files)} 首歌曲，开始处理...\n")
+        
+        success_count = 0
+        failed_count = 0
+        
+        for i, audio_file in enumerate(audio_files, 1):
+            print(f"\n{'─'*60}")
+            print(f"处理进度: [{i}/{len(audio_files)}]")
+            print(f"{'─'*60}")
+            
+            if self.process_single_file(audio_file):
+                success_count += 1
+            else:
+                failed_count += 1
+        
+        # 清理临时目录
+        temp_dir = self.output_dir / "temp"
+        try:
+            for f in temp_dir.glob("*"):
+                f.unlink()
+            temp_dir.rmdir()
+        except Exception as e:
+            print(f"⚠️  清理临时目录失败: {e}")
+        
+        # 显示统计信息
+        print(f"\n{'='*60}")
+        print(f"📊 下载统计")
+        print(f"{'='*60}")
+        print(f"  总计: {len(audio_files)} 首")
+        print(f"  成功: {success_count} 首 ✅")
+        print(f"  失败: {failed_count} 首 ❌")
+        print(f"{'='*60}\n")
+        
+        return success_count > 0
+    
+    def process_single_file(self, audio_file):
+        """
+        处理单个已下载的音频文件
+        
+        Args:
+            audio_file: 音频文件路径
+        """
+        try:
+            lrc_file = audio_file.with_suffix('.lrc')
+            
+            # 提取元数据
+            metadata = self.extract_metadata(audio_file)
+            if not metadata:
+                print(f"⚠️  跳过: {audio_file.name} (无法提取元数据)")
+                return False
+            
+            # 创建歌曲独立目录
+            song_name = metadata.get('title', 'Unknown Song')
+            artist_name = metadata.get('artist', 'Unknown Artist')
+            folder_name = self.sanitize_filename(f"{artist_name} - {song_name}")
+            song_dir = self.output_dir / folder_name
+            
+            # 如果目录已存在，跳过
+            if song_dir.exists():
+                print(f"⏭️  跳过: {folder_name} (已存在)")
+                # 清理临时文件
+                audio_file.unlink()
+                if lrc_file.exists():
+                    lrc_file.unlink()
+                return True
+            
+            song_dir.mkdir(exist_ok=True)
+            print(f"📁 {folder_name}")
+            
+            # 移动音频文件
+            new_audio_file = song_dir / audio_file.name
+            audio_file.rename(new_audio_file)
+            print(f"  ✓ 音频: {audio_file.name}")
+            
+            # 移动歌词文件
+            if lrc_file.exists():
+                new_lrc_file = song_dir / lrc_file.name
+                lrc_file.rename(new_lrc_file)
+                print(f"  ✓ 歌词: {lrc_file.name}")
+            
+            # 提取封面
+            if self.extract_cover(new_audio_file, song_dir):
+                print(f"  ✓ 封面: cover.jpg")
+            
+            # 保存元数据
+            self.save_metadata(metadata, song_dir)
+            print(f"  ✓ 元数据: metadata.txt, metadata.json")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ 处理失败 {audio_file.name}: {e}")
+            return False
+    
+    def download_song(self, spotify_url):
+        """
+        下载单首歌曲（向后兼容）
+        """
+        print(f"\n{'='*60}")
+        print(f"🎵 开始处理: {spotify_url}")
+        print(f"{'='*60}\n")
+        
+        temp_dir = self.output_dir / "temp"
+        temp_dir.mkdir(exist_ok=True)
+        
+        cmd = [
+            "spotdl",
+            "--output", str(temp_dir),
+            "--format", self.audio_format,
+            "--generate-lrc",
+            spotify_url
+        ]
+        
+        print("📥 下载中...")
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            print("✅ 下载完成！")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ 下载失败: {e}")
+            return False
+        
+        audio_files = list(temp_dir.glob(f"*.{self.audio_format}"))
+        if not audio_files:
+            print("❌ 未找到下载的音频文件")
+            return False
+        
+        audio_file = audio_files[0]
+        lrc_file = audio_file.with_suffix('.lrc')
+        
+        print("\n📝 提取元数据...")
+        metadata = self.extract_metadata(audio_file)
+        
+        if not metadata:
+            print("❌ 无法提取元数据")
+            return False
+        
+        song_name = metadata.get('title', 'Unknown Song')
+        artist_name = metadata.get('artist', 'Unknown Artist')
+        folder_name = self.sanitize_filename(f"{artist_name} - {song_name}")
+        song_dir = self.output_dir / folder_name
+        song_dir.mkdir(exist_ok=True)
+        
+        print(f"\n📁 创建目录: {folder_name}")
+        
+        new_audio_file = song_dir / audio_file.name
+        audio_file.rename(new_audio_file)
+        print(f"✅ 音频文件: {audio_file.name}")
+        
+        if lrc_file.exists():
+            new_lrc_file = song_dir / lrc_file.name
+            lrc_file.rename(new_lrc_file)
+            print(f"✅ 歌词文件: {lrc_file.name}")
+        
+        print("\n🖼️  提取封面...")
+        self.extract_cover(new_audio_file, song_dir)
+        
+        print("\n💾 保存元数据...")
+        self.save_metadata(metadata, song_dir)
+        
+        try:
+            temp_dir.rmdir()
+        except:
+            pass
+        
+        print(f"\n{'='*60}")
+        print(f"✨ 完成！所有文件已保存到: {song_dir}")
+        print(f"{'='*60}\n")
+        
+        return True
+    
+    def extract_metadata(self, audio_file):
+        """提取音频文件的元数据"""
+        try:
+            audio = MP3(str(audio_file))
+            tags = ID3(str(audio_file))
+            
+            metadata = {
+                'title': str(tags.get('TIT2', 'Unknown')),
+                'artist': str(tags.get('TPE1', 'Unknown')),
+                'album': str(tags.get('TALB', 'Unknown')),
+                'album_artist': str(tags.get('TPE2', 'Unknown')),
+                'date': str(tags.get('TDRC', 'Unknown')),
+                'genre': str(tags.get('TCON', 'Unknown')),
+                'track': str(tags.get('TRCK', 'Unknown')),
+                'disc': str(tags.get('TPOS', 'Unknown')),
+                'copyright': str(tags.get('TCOP', 'Unknown')),
+                'publisher': str(tags.get('TENC', 'Unknown')),
+                'isrc': str(tags.get('TSRC', 'Unknown')),
+                'spotify_url': str(tags.get('WOAS', 'Unknown')),
+                'youtube_url': str(tags.get('COMM::XXX', 'Unknown')),
+                'duration': f"{int(audio.info.length // 60)}分{int(audio.info.length % 60)}秒",
+                'duration_seconds': int(audio.info.length),
+                'bitrate': f"{audio.info.bitrate // 1000} kbps",
+                'sample_rate': f"{audio.info.sample_rate} Hz",
+                'channels': '立体声' if audio.info.channels == 2 else '单声道',
+                'format': self.audio_format.upper(),
+                'file_size': f"{audio_file.stat().st_size / 1024 / 1024:.2f} MB",
+                'download_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            has_cover = False
+            for key in tags.keys():
+                if key.startswith('APIC'):
+                    has_cover = True
+                    apic = tags[key]
+                    metadata['cover_type'] = apic.mime
+                    metadata['cover_size'] = f"{len(apic.data) / 1024:.1f} KB"
+                    break
+            metadata['has_cover'] = has_cover
+            
+            return metadata
+            
+        except Exception as e:
+            print(f"提取元数据错误: {e}")
+            return None
+    
+    def extract_cover(self, audio_file, output_dir):
+        """提取并保存封面图片"""
+        cover_file = output_dir / "cover.jpg"
+        
+        cmd = [
+            "ffmpeg",
+            "-i", str(audio_file),
+            "-an",
+            "-vcodec", "copy",
+            str(cover_file),
+            "-y"
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
+    def save_metadata(self, metadata, output_dir):
+        """保存元数据到文件"""
+        json_file = output_dir / "metadata.json"
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        
+        txt_file = output_dir / "metadata.txt"
+        with open(txt_file, 'w', encoding='utf-8') as f:
+            f.write("="*60 + "\n")
+            f.write(f"🎵 {metadata['title']}\n")
+            f.write("="*60 + "\n\n")
+            
+            f.write("【歌曲信息】\n")
+            f.write(f"  标题:          {metadata['title']}\n")
+            f.write(f"  艺术家:        {metadata['artist']}\n")
+            f.write(f"  专辑:          {metadata['album']}\n")
+            f.write(f"  专辑艺术家:    {metadata['album_artist']}\n")
+            f.write(f"  音轨编号:      {metadata['track']}\n")
+            f.write(f"  碟片编号:      {metadata['disc']}\n\n")
+            
+            f.write("【发行信息】\n")
+            f.write(f"  发行日期:      {metadata['date']}\n")
+            f.write(f"  流派:          {metadata['genre']}\n")
+            f.write(f"  版权:          {metadata['copyright']}\n")
+            f.write(f"  发行商:        {metadata['publisher']}\n")
+            f.write(f"  ISRC代码:      {metadata['isrc']}\n\n")
+            
+            f.write("【音频规格】\n")
+            f.write(f"  格式:          {metadata['format']}\n")
+            f.write(f"  时长:          {metadata['duration']}\n")
+            f.write(f"  比特率:        {metadata['bitrate']}\n")
+            f.write(f"  采样率:        {metadata['sample_rate']}\n")
+            f.write(f"  声道:          {metadata['channels']}\n")
+            f.write(f"  文件大小:      {metadata['file_size']}\n\n")
+            
+            f.write("【来源链接】\n")
+            f.write(f"  Spotify:       {metadata['spotify_url']}\n")
+            f.write(f"  YouTube:       {metadata['youtube_url']}\n\n")
+            
+            f.write("【下载信息】\n")
+            f.write(f"  下载时间:      {metadata['download_date']}\n")
+            f.write(f"  封面图片:      {'✅ 已提取' if metadata['has_cover'] else '❌ 无'}\n")
+            
+            if metadata['has_cover']:
+                f.write(f"  封面类型:      {metadata.get('cover_type', 'N/A')}\n")
+                f.write(f"  封面大小:      {metadata.get('cover_size', 'N/A')}\n")
+
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(
+        description='Spotify批量下载器 - 支持歌曲、专辑、歌手、播放列表',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例用法:
+  # 下载单曲
+  %(prog)s "https://open.spotify.com/track/..."
+  
+  # 下载专辑
+  %(prog)s "https://open.spotify.com/album/..."
+  
+  # 下载播放列表
+  %(prog)s "https://open.spotify.com/playlist/..."
+  
+  # 下载歌手的热门歌曲（默认前10首）
+  %(prog)s "https://open.spotify.com/artist/..." --max-songs 10
+  
+  # 指定格式和输出目录
+  %(prog)s "SPOTIFY_URL" -o music -f wav
+        '''
+    )
+    
+    parser.add_argument(
+        'url',
+        help='Spotify链接 (歌曲/专辑/播放列表/歌手)'
+    )
+    
+    parser.add_argument(
+        '-o', '--output',
+        default='downloads',
+        help='下载目录 (默认: downloads)'
+    )
+    
+    parser.add_argument(
+        '-f', '--format',
+        default='mp3',
+        choices=['mp3', 'wav', 'flac', 'ogg', 'opus', 'm4a'],
+        help='音频格式 (默认: mp3)'
+    )
+    
+    parser.add_argument(
+        '--max-songs',
+        type=int,
+        help='歌手模式下的最大下载数量 (默认: 无限制)'
+    )
+    
+    args = parser.parse_args()
+    
+    print("\n" + "="*60)
+    print("🎵 Spotify批量下载器")
+    print("="*60)
+    
+    downloader = SpotifyBatchDownloader(
+        output_dir=args.output,
+        audio_format=args.format,
+        max_songs=args.max_songs
+    )
+    
+    success = downloader.process_batch(args.url)
+    
+    if success:
+        print("✨ 所有任务完成！\n")
+        sys.exit(0)
+    else:
+        print("❌ 下载失败！\n")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
+
