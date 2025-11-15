@@ -12,6 +12,11 @@ nav:
 - Usage:
   - Usage examples: usage.md
   - Troubleshooting: troubleshooting.md
+- 中文文档 (Chinese):
+  - 首页: index_zh.md
+  - 安装指南: installation_zh.md
+  - 使用指南: usage_zh.md
+  - 故障排除: troubleshooting_zh.md
 - Development:
   - Code Of Conduct: CODE_OF_CONDUCT.md
   - Contributing: CONTRIBUTING.md
