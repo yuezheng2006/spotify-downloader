@@ -343,13 +343,26 @@ async def execute_download(
             try:
                 result = await asyncio.to_thread(downloader.download_song, url)
                 if result and isinstance(result, dict):
+                    # 检查是否是错误结果
+                    if result.get("error"):
+                        error_msg = result.get("message", "下载失败")
+                        raise Exception(error_msg)
+                    
+                    # 成功结果（可能是完整下载或仅元数据）
+                    is_metadata_only = result.get("metadata_only", False)
                     status.files.append({
                         "name": result["song_name"],
                         "path": result["directory"],
-                        "files": result["files"]
+                        "files": result["files"],
+                        "metadata_only": is_metadata_only
                     })
                     status.progress = 1
-                    print(f"[{task_id}] ✅ 下载成功: {result['song_name']}")
+                    if is_metadata_only:
+                        print(f"[{task_id}] ✅ 已获取元数据和歌词（无音频文件）: {result['song_name']}")
+                        status.message = f"已获取元数据和歌词（音频文件未下载）"
+                    else:
+                        print(f"[{task_id}] ✅ 下载成功: {result['song_name']}")
+                        status.message = f"下载完成！"
                 else:
                     error_detail = "下载返回空结果"
                     if result is False:
@@ -360,7 +373,7 @@ async def execute_download(
                 print(f"[{task_id}] ❌ 下载失败: {error_msg}")
                 import traceback
                 traceback.print_exc()
-                raise Exception(f"下载失败: {error_msg}")
+                raise Exception(error_msg)  # 直接抛出原始错误信息，不重复包装
         else:
             # 批量下载：获取歌曲列表（已下载到临时目录）
             print(f"[{task_id}] 批量模式，获取歌曲列表...")
@@ -940,12 +953,17 @@ https://open.spotify.com/playlist/..."></textarea>
                                 const downloadFileUrl = `/api/download/file?file_path=${filePath}`;
                                 return `<a href="${downloadFileUrl}" style="color: #667eea; text-decoration: none; margin-right: 10px;" download>📥 ${fileName}</a>`;
                             }).join('');
+                            const isMetadataOnly = f.metadata_only || false;
                             return `<div class="task-item">
-                                <div style="font-weight: 600; margin-bottom: 8px;">✓ ${f.name}</div>
+                                <div style="font-weight: 600; margin-bottom: 8px;">
+                                    ${isMetadataOnly ? '⚠️' : '✓'} ${f.name}
+                                    ${isMetadataOnly ? '<span style="font-size: 11px; color: #ff9800; margin-left: 8px;">(仅元数据)</span>' : ''}
+                                </div>
                                 <div style="font-size: 12px; color: #999; margin-top: 5px; margin-bottom: 10px;">
                                     📂 ${f.path}<br/>
                                     📄 ${f.files.join(', ')}
                                 </div>
+                                ${isMetadataOnly ? '<div style="background: #fff3cd; padding: 8px; border-radius: 4px; margin-bottom: 10px; font-size: 12px; color: #856404;">⚠️ 注意：音频文件未下载，仅获取了元数据和歌词</div>' : ''}
                                 <div style="margin-top: 10px;">
                                     <a href="${downloadDirUrl}" style="display: inline-block; padding: 6px 12px; background: #667eea; color: white; text-decoration: none; border-radius: 4px; font-size: 13px; margin-right: 8px;" download>📦 下载整个目录 (ZIP)</a>
                                     <div style="margin-top: 8px;">
