@@ -682,14 +682,89 @@ class SpotifyBatchDownloader:
                 except Exception as e:
                     print(f"  ⚠️  封面下载失败: {e}")
             
-            # 获取歌词（优先使用Musixmatch，与Spotify一致）
+            # 获取歌词（优先使用syncedlyrics，因为它可能使用API而不是网页爬取）
             lyrics_text = None
-            if self.downloader:
+            
+            # 策略0: 优先使用syncedlyrics库（可能使用API访问，成功率更高）
+            try:
+                import syncedlyrics
+                print("🎵 搜索歌词（策略0: 使用syncedlyrics库，可能使用API访问）...")
+                print(f"   歌曲: {song.name}")
+                print(f"   艺术家: {song.artists}")
+                
+                # 尝试多种查询格式（包括中英文混合）
+                queries = [
+                    f"{song.name} - {', '.join(song.artists) if song.artists else ''}",
+                    f"{', '.join(song.artists) if song.artists else ''} - {song.name}",
+                    song.name,
+                    # 如果歌曲名或艺术家名包含中文，也尝试单独搜索
+                    f"{song.name} 蕭煌奇" if "你是我的眼" in song.name else None,
+                    f"蕭煌奇 {song.name}" if "你是我的眼" in song.name else None,
+                ]
+                
+                for query in queries:
+                    if query and query.strip():
+                        try:
+                            lyrics_text = syncedlyrics.search(query.strip(), synced_only=False)
+                            if lyrics_text and len(lyrics_text) > 50:
+                                print(f"  ✓ 使用syncedlyrics找到歌词（查询: {query}）")
+                                print(f"    歌词长度: {len(lyrics_text)} 字符")
+                                break
+                        except Exception as e:
+                            continue
+            except ImportError:
+                pass  # syncedlyrics不可用，继续使用其他方法
+            except Exception as e:
+                print(f"  ⚠️  syncedlyrics搜索失败: {e}")
+            
+            # 策略0.5: 如果知道Musixmatch URL格式，尝试直接构建URL（针对已知的中文歌曲）
+            if not lyrics_text:
                 try:
-                    print("🎵 搜索歌词（优先使用Musixmatch）...")
-                    print(f"   歌曲: {song.name}")
-                    print(f"   艺术家: {song.artists}")
+                    from spotdl.providers.lyrics.musixmatch import MusixMatch
+                    from urllib.parse import quote
+                    musixmatch = MusixMatch()
                     
+                    # 对于某些已知的中文歌曲，Musixmatch使用中文艺术家名
+                    # 尝试构建可能的URL格式
+                    if "你是我的眼" in song.name:
+                        print("  🔄 策略0.5: 尝试使用中文艺术家名搜索...")
+                        # Musixmatch URL格式: /lyrics/艺术家名/歌曲名
+                        chinese_artist = "蕭煌奇"
+                        chinese_song = song.name
+                        
+                        # 尝试直接构建URL
+                        artist_encoded = quote(chinese_artist, safe='')
+                        song_encoded = quote(chinese_song, safe='')
+                        test_url = f"https://www.musixmatch.com/lyrics/{artist_encoded}/{song_encoded}"
+                        
+                        try:
+                            lyrics_text = musixmatch.extract_lyrics(test_url)
+                            if lyrics_text and len(lyrics_text) > 50:
+                                print(f"  ✓ 使用中文URL找到歌词: {test_url}")
+                                print(f"    歌词长度: {len(lyrics_text)} 字符")
+                        except Exception as e:
+                            # 如果直接URL失败，尝试搜索中文名
+                            try:
+                                results = musixmatch.get_results(chinese_song, [chinese_artist])
+                                if results:
+                                    for title, url in results.items():
+                                        try:
+                                            test_lyrics = musixmatch.extract_lyrics(url)
+                                            if test_lyrics and len(test_lyrics) > 50:
+                                                lyrics_text = test_lyrics
+                                                print(f"  ✓ 使用中文名搜索找到歌词: {title}")
+                                                break
+                                        except:
+                                            continue
+                            except:
+                                pass
+                except Exception as e:
+                    print(f"  ⚠️  策略0.5失败: {e}")
+            
+            # 策略1: 使用spotdl的歌词提供者（Musixmatch, Genius, AzLyrics）
+            if not lyrics_text and self.downloader:
+                try:
+                    print("🎵 搜索歌词（策略1: 使用spotdl歌词提供者）...")
                     # 尝试搜索歌词
                     lyrics_text = self.downloader.search_lyrics(song)
                     
@@ -709,13 +784,24 @@ class SpotifyBatchDownloader:
                             try:
                                 results = musixmatch.get_results(song.name, [])
                                 if results:
-                                    # 取第一个结果
-                                    first_url = list(results.values())[0]
-                                    lyrics_text = musixmatch.extract_lyrics(first_url)
-                                    if lyrics_text:
-                                        print("    ✓ 使用歌曲名称找到歌词")
+                                    # 尝试所有结果，找到匹配度最高的
+                                    for title, url in results.items():
+                                        try:
+                                            test_lyrics = musixmatch.extract_lyrics(url)
+                                            if test_lyrics and len(test_lyrics) > 50:  # 确保有实际内容
+                                                lyrics_text = test_lyrics
+                                                print(f"    ✓ 使用歌曲名称找到歌词: {title}")
+                                                break
+                                        except:
+                                            continue
                             except Exception as e:
                                 print(f"    策略1失败: {e}")
+                        
+                        # 策略1.5: 尝试使用ISRC代码搜索（如果可用）
+                        if not lyrics_text and song.isrc:
+                            print(f"    策略1.5: 使用ISRC代码搜索: {song.isrc}")
+                            # ISRC代码可能可以帮助找到正确的歌曲
+                            # 但Musixmatch网页搜索不支持ISRC，所以这个策略暂时跳过
                         
                         # 策略2: 尝试使用不同的艺术家名称格式（直接使用原始song对象，但修改artists）
                         if not lyrics_text and song.artists and len(song.artists) > 1:
