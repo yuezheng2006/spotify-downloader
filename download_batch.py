@@ -94,9 +94,9 @@ class SpotifyBatchDownloader:
         temp_dir = self.output_dir / "temp"
         temp_dir.mkdir(exist_ok=True)
         
-        # 构建spotdl命令
+        # 构建spotdl命令 - 使用 python -m spotdl 确保在Docker环境中也能正常工作
         cmd = [
-            "spotdl",
+            sys.executable, "-m", "spotdl",
             "--output", str(temp_dir),
             "--format", self.audio_format,
             "--generate-lrc",
@@ -210,7 +210,17 @@ class SpotifyBatchDownloader:
                 audio_file.unlink()
                 if lrc_file.exists():
                     lrc_file.unlink()
-                return True
+                # 返回已存在的文件信息
+                files_list = []
+                for f in song_dir.iterdir():
+                    if f.is_file():
+                        files_list.append(f.name)
+                return {
+                    "song_name": folder_name,
+                    "directory": str(song_dir.relative_to(self.output_dir)),
+                    "files": files_list,
+                    "full_path": str(song_dir)
+                }
             
             song_dir.mkdir(exist_ok=True)
             print(f"📁 {folder_name}")
@@ -234,7 +244,18 @@ class SpotifyBatchDownloader:
             self.save_metadata(metadata, song_dir)
             print(f"  ✓ 元数据: metadata.txt, metadata.json")
             
-            return True
+            # 返回文件信息
+            files_list = []
+            for f in song_dir.iterdir():
+                if f.is_file():
+                    files_list.append(f.name)
+            
+            return {
+                "song_name": folder_name,
+                "directory": str(song_dir.relative_to(self.output_dir)),
+                "files": files_list,
+                "full_path": str(song_dir)
+            }
             
         except Exception as e:
             print(f"❌ 处理失败 {audio_file.name}: {e}")
@@ -252,7 +273,7 @@ class SpotifyBatchDownloader:
         temp_dir.mkdir(exist_ok=True)
         
         cmd = [
-            "spotdl",
+            sys.executable, "-m", "spotdl",
             "--output", str(temp_dir),
             "--format", self.audio_format,
             "--generate-lrc",
@@ -314,7 +335,18 @@ class SpotifyBatchDownloader:
         print(f"✨ 完成！所有文件已保存到: {song_dir}")
         print(f"{'='*60}\n")
         
-        return True
+        # 返回文件信息
+        files_list = []
+        for f in song_dir.iterdir():
+            if f.is_file():
+                files_list.append(f.name)
+        
+        return {
+            "song_name": folder_name,
+            "directory": str(song_dir.relative_to(self.output_dir)),
+            "files": files_list,
+            "full_path": str(song_dir)
+        }
     
     def extract_metadata(self, audio_file):
         """提取音频文件的元数据"""

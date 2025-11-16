@@ -19,13 +19,15 @@ import sys
 import json
 import asyncio
 import argparse
+import zipfile
+import shutil
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
@@ -171,6 +173,129 @@ async def delete_download(task_id: str):
     return {"message": "任务已删除"}
 
 
+@app.get("/api/download/file")
+async def download_file(file_path: str = Query(..., description="文件路径，相对于downloads目录")):
+    """下载单个文件"""
+    try:
+        # 安全检查：确保路径在downloads目录内
+        downloads_dir = Path("downloads").resolve()
+        full_path = (downloads_dir / file_path).resolve()
+        
+        # 检查路径是否在downloads目录内（防止路径遍历攻击）
+        if not str(full_path).startswith(str(downloads_dir)):
+            raise HTTPException(status_code=403, detail="访问被拒绝：路径不安全")
+        
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        
+        if full_path.is_dir():
+            raise HTTPException(status_code=400, detail="这是一个目录，请使用 /api/download/dir 下载")
+        
+        return FileResponse(
+            str(full_path),
+            filename=full_path.name,
+            media_type='application/octet-stream'
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+@app.get("/api/download/dir")
+async def download_directory(dir_path: str = Query(..., description="目录路径，相对于downloads目录")):
+    """下载整个目录（打包为zip）"""
+    try:
+        # 安全检查：确保路径在downloads目录内
+        downloads_dir = Path("downloads").resolve()
+        full_path = (downloads_dir / dir_path).resolve()
+        
+        # 检查路径是否在downloads目录内
+        if not str(full_path).startswith(str(downloads_dir)):
+            raise HTTPException(status_code=403, detail="访问被拒绝：路径不安全")
+        
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="目录不存在")
+        
+        if not full_path.is_dir():
+            raise HTTPException(status_code=400, detail="这不是一个目录")
+        
+        # 创建临时zip文件
+        zip_path = Path(f"/tmp/{full_path.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+        
+        def generate_zip():
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in full_path.rglob('*'):
+                    if file_path.is_file():
+                        arcname = file_path.relative_to(full_path)
+                        zipf.write(file_path, arcname)
+            
+            # 读取zip文件并删除
+            with open(zip_path, 'rb') as f:
+                data = f.read()
+            zip_path.unlink()
+            return data
+        
+        zip_data = generate_zip()
+        
+        return StreamingResponse(
+            iter([zip_data]),
+            media_type='application/zip',
+            headers={
+                "Content-Disposition": f"attachment; filename={full_path.name}.zip"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打包失败: {str(e)}")
+
+
+@app.get("/api/files/list")
+async def list_files(dir_path: str = Query("", description="目录路径，相对于downloads目录")):
+    """列出下载的文件"""
+    try:
+        downloads_dir = Path("downloads").resolve()
+        full_path = (downloads_dir / dir_path).resolve() if dir_path else downloads_dir
+        
+        # 安全检查
+        if not str(full_path).startswith(str(downloads_dir)):
+            raise HTTPException(status_code=403, detail="访问被拒绝：路径不安全")
+        
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="目录不存在")
+        
+        files = []
+        dirs = []
+        
+        for item in sorted(full_path.iterdir()):
+            relative_path = str(item.relative_to(downloads_dir))
+            if item.is_dir():
+                dirs.append({
+                    "name": item.name,
+                    "path": relative_path,
+                    "type": "directory"
+                })
+            else:
+                files.append({
+                    "name": item.name,
+                    "path": relative_path,
+                    "type": "file",
+                    "size": item.stat().st_size,
+                    "download_url": f"/api/download/file?file_path={relative_path}"
+                })
+        
+        return {
+            "current_path": dir_path or ".",
+            "directories": dirs,
+            "files": files
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"列出文件失败: {str(e)}")
+
+
 # ============================================================================
 # 下载执行逻辑
 # ============================================================================
@@ -209,52 +334,87 @@ async def execute_download(
         status.message = f"检测到类型: {url_type}"
         print(f"[{task_id}] URL类型: {url_type}")
         
-        # 获取歌曲列表
-        print(f"[{task_id}] 获取歌曲列表...")
-        status.message = "正在获取歌曲列表..."
-        songs = await asyncio.to_thread(downloader.get_songs_list, url)
-        status.total = len(songs)
-        status.message = f"找到 {len(songs)} 首歌曲"
-        print(f"[{task_id}] 找到 {len(songs)} 首歌曲")
-        
-        # 下载每首歌
-        downloaded_files = []
-        for i, song_url in enumerate(songs, 1):
-            status.progress = i
-            status.current_song = f"正在下载第 {i}/{len(songs)} 首"
-            print(f"\n[{task_id}] 下载进度: {i}/{len(songs)}")
-            print(f"[{task_id}] 歌曲URL: {song_url}")
+        # 如果是单曲，直接使用download_song
+        if url_type == 'track':
+            print(f"[{task_id}] 单曲模式，直接下载...")
+            status.message = "正在下载单曲..."
+            status.total = 1
             
             try:
-                # 执行下载
-                result = await asyncio.to_thread(
-                    downloader.download_song,
-                    song_url
-                )
-                
+                result = await asyncio.to_thread(downloader.download_song, url)
                 if result:
-                    downloaded_files.append(result)
                     status.files.append({
                         "name": result["song_name"],
                         "path": result["directory"],
                         "files": result["files"]
                     })
+                    status.progress = 1
                     print(f"[{task_id}] ✅ 下载成功: {result['song_name']}")
                 else:
-                    print(f"[{task_id}] ⚠️  下载返回空结果")
-                
+                    raise Exception("下载返回空结果")
             except Exception as e:
-                print(f"[{task_id}] ❌ 下载失败: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                continue
+                raise Exception(f"下载失败: {str(e)}")
+        else:
+            # 批量下载：获取歌曲列表（已下载到临时目录）
+            print(f"[{task_id}] 批量模式，获取歌曲列表...")
+            status.message = "正在获取歌曲列表..."
+            audio_files = await asyncio.to_thread(downloader.get_songs_list, url)
+            status.total = len(audio_files)
+            status.message = f"找到 {len(audio_files)} 首歌曲"
+            print(f"[{task_id}] 找到 {len(audio_files)} 首歌曲")
+            
+            # 处理每首已下载的歌曲
+            downloaded_files = []
+            for i, audio_file in enumerate(audio_files, 1):
+                status.progress = i
+                status.current_song = f"正在处理第 {i}/{len(audio_files)} 首"
+                print(f"\n[{task_id}] 处理进度: {i}/{len(audio_files)}")
+                print(f"[{task_id}] 文件: {audio_file}")
+                
+                try:
+                    # 处理已下载的文件
+                    result = await asyncio.to_thread(
+                        downloader.process_single_file,
+                        audio_file
+                    )
+                    
+                    if result:
+                        downloaded_files.append(result)
+                        status.files.append({
+                            "name": result["song_name"],
+                            "path": result["directory"],
+                            "files": result["files"]
+                        })
+                        print(f"[{task_id}] ✅ 处理成功: {result['song_name']}")
+                    else:
+                        print(f"[{task_id}] ⚠️  处理返回空结果")
+                    
+                except Exception as e:
+                    print(f"[{task_id}] ❌ 处理失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            # 清理临时目录
+            temp_dir = downloader.output_dir / "temp"
+            try:
+                for f in temp_dir.glob("*"):
+                    f.unlink()
+                temp_dir.rmdir()
+            except Exception as e:
+                print(f"[{task_id}] ⚠️  清理临时目录失败: {e}")
         
         # 完成
         status.status = "completed"
         status.progress = status.total
-        status.message = f"下载完成！成功 {len(downloaded_files)}/{status.total} 首"
+        if url_type == 'track':
+            status.message = f"下载完成！"
+        else:
+            downloaded_count = len(status.files)
+            status.message = f"下载完成！成功 {downloaded_count}/{status.total} 首"
         print(f"\n[{task_id}] ✅ 任务完成！")
-        print(f"[{task_id}] 成功: {len(downloaded_files)}/{status.total}")
+        if url_type != 'track':
+            print(f"[{task_id}] 成功: {len(status.files)}/{status.total}")
         print(f"{'='*60}\n")
         
     except Exception as e:
@@ -765,15 +925,28 @@ https://open.spotify.com/playlist/..."></textarea>
                 if (task.files && task.files.length > 0) {
                     const taskList = document.getElementById('taskList');
                     taskList.innerHTML = '<h4>已完成:</h4>' + 
-                        task.files.map(f => 
-                            `<div class="task-item">
-                                ✓ ${f.name}
-                                <div style="font-size: 12px; color: #999; margin-top: 5px;">
+                        task.files.map(f => {
+                            const dirPath = encodeURIComponent(f.path);
+                            const downloadDirUrl = `/api/download/dir?dir_path=${dirPath}`;
+                            const fileItems = f.files.map(fileName => {
+                                const filePath = encodeURIComponent(f.path + '/' + fileName);
+                                const downloadFileUrl = `/api/download/file?file_path=${filePath}`;
+                                return `<a href="${downloadFileUrl}" style="color: #667eea; text-decoration: none; margin-right: 10px;" download>📥 ${fileName}</a>`;
+                            }).join('');
+                            return `<div class="task-item">
+                                <div style="font-weight: 600; margin-bottom: 8px;">✓ ${f.name}</div>
+                                <div style="font-size: 12px; color: #999; margin-top: 5px; margin-bottom: 10px;">
                                     📂 ${f.path}<br/>
                                     📄 ${f.files.join(', ')}
                                 </div>
-                            </div>`
-                        ).join('');
+                                <div style="margin-top: 10px;">
+                                    <a href="${downloadDirUrl}" style="display: inline-block; padding: 6px 12px; background: #667eea; color: white; text-decoration: none; border-radius: 4px; font-size: 13px; margin-right: 8px;" download>📦 下载整个目录 (ZIP)</a>
+                                    <div style="margin-top: 8px;">
+                                        ${fileItems}
+                                    </div>
+                                </div>
+                            </div>`;
+                        }).join('');
                 }
                 
                 // 如果还在下载，继续轮询
