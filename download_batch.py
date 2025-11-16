@@ -109,10 +109,25 @@ class SpotifyBatchDownloader:
             print(f"⚠️  歌手模式：将下载最多 {self.max_songs} 首热门歌曲")
         
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return list(temp_dir.glob(f"*.{self.audio_format}"))
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            audio_files = list(temp_dir.glob(f"*.{self.audio_format}"))
+            if not audio_files:
+                print(f"⚠️  警告: 命令执行成功但未找到音频文件")
+                print(f"   查找目录: {temp_dir}")
+                print(f"   查找格式: *.{self.audio_format}")
+                all_files = list(temp_dir.glob("*"))
+                if all_files:
+                    print(f"   目录中的文件: {[f.name for f in all_files]}")
+                if result.stdout:
+                    print(f"   命令输出: {result.stdout[:500]}")
+            return audio_files
         except subprocess.CalledProcessError as e:
-            print(f"❌ 下载失败: {e.stderr}")
+            error_msg = f"❌ 下载失败 (返回码: {e.returncode})"
+            if e.stderr:
+                error_msg += f"\n错误信息: {e.stderr[:1000]}"
+            if e.stdout:
+                error_msg += f"\n输出: {e.stdout[:500]}"
+            print(error_msg)
             return []
     
     def process_batch(self, spotify_url):
@@ -282,15 +297,30 @@ class SpotifyBatchDownloader:
         
         print("📥 下载中...")
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             print("✅ 下载完成！")
+            if result.stdout:
+                print(f"输出: {result.stdout[:500]}")  # 只打印前500字符
         except subprocess.CalledProcessError as e:
-            print(f"❌ 下载失败: {e}")
+            error_msg = f"❌ 下载失败 (返回码: {e.returncode})"
+            if e.stderr:
+                error_msg += f"\n错误信息: {e.stderr[:1000]}"  # 打印前1000字符
+            if e.stdout:
+                error_msg += f"\n输出: {e.stdout[:500]}"
+            print(error_msg)
             return False
         
         audio_files = list(temp_dir.glob(f"*.{self.audio_format}"))
         if not audio_files:
-            print("❌ 未找到下载的音频文件")
+            print(f"❌ 未找到下载的音频文件")
+            print(f"   查找目录: {temp_dir}")
+            print(f"   查找格式: *.{self.audio_format}")
+            # 列出临时目录中的所有文件
+            all_files = list(temp_dir.glob("*"))
+            if all_files:
+                print(f"   目录中的文件: {[f.name for f in all_files]}")
+            else:
+                print(f"   目录为空")
             return False
         
         audio_file = audio_files[0]

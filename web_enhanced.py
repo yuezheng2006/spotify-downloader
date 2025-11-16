@@ -342,7 +342,7 @@ async def execute_download(
             
             try:
                 result = await asyncio.to_thread(downloader.download_song, url)
-                if result:
+                if result and isinstance(result, dict):
                     status.files.append({
                         "name": result["song_name"],
                         "path": result["directory"],
@@ -351,9 +351,16 @@ async def execute_download(
                     status.progress = 1
                     print(f"[{task_id}] ✅ 下载成功: {result['song_name']}")
                 else:
-                    raise Exception("下载返回空结果")
+                    error_detail = "下载返回空结果"
+                    if result is False:
+                        error_detail = "spotdl命令执行失败，请检查错误日志"
+                    raise Exception(error_detail)
             except Exception as e:
-                raise Exception(f"下载失败: {str(e)}")
+                error_msg = str(e)
+                print(f"[{task_id}] ❌ 下载失败: {error_msg}")
+                import traceback
+                traceback.print_exc()
+                raise Exception(f"下载失败: {error_msg}")
         else:
             # 批量下载：获取歌曲列表（已下载到临时目录）
             print(f"[{task_id}] 批量模式，获取歌曲列表...")
