@@ -1,36 +1,30 @@
-FROM python:3-alpine
+FROM python:3.11-slim
 
-LABEL maintainer="xnetcat (Jakub)"
-
-# Install dependencies
-RUN apk add --no-cache \
-    ca-certificates \
-    ffmpeg \
-    openssl \
-    aria2 \
-    g++ \
-    git \
-    py3-cffi \
-    libffi-dev \
-    zlib-dev
-
-# Install uv and update pip/wheel
-RUN pip install --upgrade pip uv wheel spotipy
-
-# Set workdir
+# 设置工作目录
 WORKDIR /app
 
-# Copy requirements files
-COPY . .
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install spotdl requirements
-RUN uv sync
+# 复制项目文件
+COPY pyproject.toml ./
+COPY spotdl ./spotdl
+COPY web_enhanced.py ./
+COPY download_batch.py ./
 
-# Create a volume for the output directory
-VOLUME /music
+# 安装 Python 依赖
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir fastapi uvicorn[standard]
 
-# Change Workdir to download location
-WORKDIR /music
+# 创建下载目录
+RUN mkdir -p /app/downloads
 
-# Entrypoint command
-ENTRYPOINT ["uv", "run", "--project", "/app", "spotdl"]
+# 暴露端口
+EXPOSE 8800
+
+# 启动命令
+CMD ["python3", "web_enhanced.py", "--host", "0.0.0.0", "--port", "8800"]

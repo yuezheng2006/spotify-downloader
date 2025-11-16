@@ -814,9 +814,10 @@ https://open.spotify.com/playlist/..."></textarea>
 # ============================================================================
 
 def main():
+    import os
     parser = argparse.ArgumentParser(description="spotDL 增强版 Web UI")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址")
-    parser.add_argument("--port", type=int, default=8800, help="监听端口")
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8800)), help="监听端口")
     parser.add_argument("--reload", action="store_true", help="开发模式（自动重载）")
     
     args = parser.parse_args()
