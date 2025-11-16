@@ -47,9 +47,11 @@ try:
     from spotdl.types.song import Song
     from spotdl.utils.spotify import SpotifyClient
     from spotdl.download.downloader import Downloader
+    from spotdl.utils.config import SPOTIFY_OPTIONS
     SPOTDL_AVAILABLE = True
 except ImportError:
     SPOTDL_AVAILABLE = False
+    SPOTIFY_OPTIONS = None
     print("⚠️  警告: spotdl模块不可用，将无法获取元数据")
 
 
@@ -71,9 +73,10 @@ class SpotifyBatchDownloader:
         self.max_songs = max_songs
         
         # 初始化Spotify客户端（如果可用）
-        if SPOTDL_AVAILABLE:
+        if SPOTDL_AVAILABLE and SPOTIFY_OPTIONS:
             try:
-                SpotifyClient.init()
+                # 使用spotdl的默认配置初始化Spotify客户端
+                SpotifyClient.init(**SPOTIFY_OPTIONS)
                 self.spotify_client = SpotifyClient()
                 # 优先使用Musixmatch（Spotify主要使用的歌词平台）
                 # 然后使用Genius和AzLyrics作为备选
@@ -83,6 +86,8 @@ class SpotifyBatchDownloader:
                 self.downloader = Downloader(settings=downloader_settings)
             except Exception as e:
                 print(f"⚠️  警告: 初始化Spotify客户端失败: {e}")
+                import traceback
+                traceback.print_exc()
                 self.spotify_client = None
                 self.downloader = None
         else:
@@ -424,6 +429,12 @@ class SpotifyBatchDownloader:
         except BrokenPipeError as e:
             error_msg = f"❌ 下载失败: 管道中断 (Broken pipe)"
             print(error_msg)
+            # 触发兜底处理
+            print("\n🔄 尝试获取元数据和歌词（兜底处理）...")
+            fallback_result = self.get_metadata_and_lyrics_only(spotify_url)
+            if fallback_result:
+                print("✅ 已获取元数据和歌词（无音频文件）")
+                return fallback_result
             return False
         except subprocess.CalledProcessError as e:
             error_msg = f"❌ 下载失败 (返回码: {e.returncode})"
@@ -432,12 +443,24 @@ class SpotifyBatchDownloader:
             if e.stdout:
                 error_msg += f"\n输出: {e.stdout[:500]}"
             print(error_msg)
+            # 触发兜底处理
+            print("\n🔄 尝试获取元数据和歌词（兜底处理）...")
+            fallback_result = self.get_metadata_and_lyrics_only(spotify_url)
+            if fallback_result:
+                print("✅ 已获取元数据和歌词（无音频文件）")
+                return fallback_result
             return False
         except Exception as e:
             error_msg = f"❌ 下载失败: {str(e)}"
             print(error_msg)
             import traceback
             traceback.print_exc()
+            # 触发兜底处理
+            print("\n🔄 尝试获取元数据和歌词（兜底处理）...")
+            fallback_result = self.get_metadata_and_lyrics_only(spotify_url)
+            if fallback_result:
+                print("✅ 已获取元数据和歌词（无音频文件）")
+                return fallback_result
             return False
         
         audio_files = list(temp_dir.glob(f"*.{self.audio_format}"))
@@ -451,6 +474,14 @@ class SpotifyBatchDownloader:
                 print(f"   目录中的文件: {[f.name for f in all_files]}")
             else:
                 print(f"   目录为空")
+            
+            # 触发兜底处理：即使找不到音频文件，也尝试获取元数据和歌词
+            print("\n🔄 尝试获取元数据和歌词（兜底处理）...")
+            fallback_result = self.get_metadata_and_lyrics_only(spotify_url)
+            if fallback_result:
+                print("✅ 已获取元数据和歌词（无音频文件）")
+                return fallback_result
+            
             return False
         
         audio_file = audio_files[0]
@@ -598,11 +629,22 @@ class SpotifyBatchDownloader:
             print(f"📁 创建目录: {folder_name}")
             
             # 构建元数据字典
+            # 处理artists列表
+            artist_str = ', '.join(song.artists) if song.artists else 'Unknown'
+            # 处理album_artist（可能是字符串或列表）
+            if song.album_artist:
+                if isinstance(song.album_artist, list):
+                    album_artist_str = ', '.join(song.album_artist)
+                else:
+                    album_artist_str = str(song.album_artist)
+            else:
+                album_artist_str = artist_str  # 如果没有专辑艺术家，使用主艺术家
+            
             metadata = {
                 'title': song.name or 'Unknown',
-                'artist': ', '.join(song.artists) if song.artists else 'Unknown',
+                'artist': artist_str,
                 'album': song.album_name or 'Unknown',
-                'album_artist': ', '.join(song.album_artist) if song.album_artist else 'Unknown',
+                'album_artist': album_artist_str,
                 'date': str(song.date) if song.date else 'Unknown',
                 'genre': ', '.join(song.genres) if song.genres else 'Unknown',
                 'track': str(song.track_number) if song.track_number else 'Unknown',
@@ -645,14 +687,59 @@ class SpotifyBatchDownloader:
             if self.downloader:
                 try:
                     print("🎵 搜索歌词（优先使用Musixmatch）...")
+                    print(f"   歌曲: {song.name}")
+                    print(f"   艺术家: {song.artists}")
+                    
+                    # 尝试搜索歌词
                     lyrics_text = self.downloader.search_lyrics(song)
+                    
                     if lyrics_text:
-                        # 尝试确定歌词来源（通过检查下载器使用的提供者）
-                        print("  ✓ 找到歌词")
+                        print(f"  ✓ 找到歌词（长度: {len(lyrics_text)} 字符）")
                     else:
                         print("  ⚠️  未找到歌词")
+                        # 尝试不同的搜索策略
+                        print("  🔄 尝试备用搜索策略...")
+                        
+                        # 策略1: 尝试只使用歌曲名称（不带艺术家）
+                        if not lyrics_text and song.name:
+                            print("    策略1: 仅使用歌曲名称搜索...")
+                            from spotdl.providers.lyrics.musixmatch import MusixMatch
+                            musixmatch = MusixMatch()
+                            # 尝试只搜索歌曲名称
+                            try:
+                                results = musixmatch.get_results(song.name, [])
+                                if results:
+                                    # 取第一个结果
+                                    first_url = list(results.values())[0]
+                                    lyrics_text = musixmatch.extract_lyrics(first_url)
+                                    if lyrics_text:
+                                        print("    ✓ 使用歌曲名称找到歌词")
+                            except Exception as e:
+                                print(f"    策略1失败: {e}")
+                        
+                        # 策略2: 尝试使用不同的艺术家名称格式（直接使用原始song对象，但修改artists）
+                        if not lyrics_text and song.artists and len(song.artists) > 1:
+                            print("    策略2: 尝试只使用第一个艺术家...")
+                            # 临时修改artists列表
+                            original_artists = song.artists.copy()
+                            try:
+                                song.artists = [song.artists[0]]
+                                lyrics_text = self.downloader.search_lyrics(song)
+                                if lyrics_text:
+                                    print("    ✓ 使用简化艺术家名称找到歌词")
+                            except Exception as e:
+                                print(f"    策略2失败: {e}")
+                            finally:
+                                # 恢复原始artists
+                                song.artists = original_artists
+                        
+                        if not lyrics_text:
+                            print("  ⚠️  所有搜索策略均未找到歌词")
+                            print("  💡 提示: 这首歌可能在歌词平台上没有歌词，或者需要不同的搜索关键词")
                 except Exception as e:
                     print(f"  ⚠️  歌词搜索失败: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # 保存歌词文件
             if lyrics_text:
