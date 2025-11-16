@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
 
 # 复制项目文件
 COPY pyproject.toml ./
+COPY README.md ./
+COPY uv.lock ./
 COPY spotdl ./spotdl
 COPY web_enhanced.py ./
 COPY download_batch.py ./
